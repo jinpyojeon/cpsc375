@@ -5,7 +5,6 @@
 #include <math.h>
 
 #define TILE_WIDTH 16
-#define BLOCK_WIDTH TILE_WIDTH
 
 __global__ void TiledMatrixMulKernel(float* M, float* N, float* P, int j, int k, int l)
 {
@@ -16,37 +15,30 @@ __global__ void TiledMatrixMulKernel(float* M, float* N, float* P, int j, int k,
 	 int Row = by * TILE_WIDTH + ty;
 	 int Col = bx * TILE_WIDTH + tx;
 	 float Pvalue = 0;
-	 // printf("%d %d\n", Row, Col);
 	// Loop over the M and N tiles required to compute the P element
 	for (int ph = 0; ph < (k - 1)/TILE_WIDTH + 1; ++ph) {
 	 // Collaborative loading of M and N tiles into shared memory
 		 if (Row < j && ph * TILE_WIDTH + tx < k) { 
 			ds_M[ty][tx] = M[Row*k + ph*TILE_WIDTH + tx];
-			// printf("M %d %d %f \n", Row, ph * TILE_WIDTH + tx, ds_M[ty][tx]);
 		 } else {
 			ds_M[ty][tx] = 0.0;
 		 }
 
 		 if (Col < l && ph * TILE_WIDTH + ty < k) {
 			ds_N[ty][tx] = N[(ph*TILE_WIDTH + ty)*l + Col];
-			// printf("N %d %d %f \n", ph*TILE_WIDTH + ty, Col, ds_N[ty][tx]);
 		 } else {
 			ds_N[ty][tx] = 0.0;
 		 }
 
 		 __syncthreads();
 
-		// printf("Ty tx %d %d\n", ty, tx);
 		 for (int i = 0; i < TILE_WIDTH; ++i) {
 			 Pvalue += ds_M[ty][i] * ds_N[i][tx];
 		 }
-		 // printf("\n");
 		 __syncthreads();
 	 }	
 	 if (Row < j && Col < l) {
-		// printf("Pval %f Row Col %d %d J L %d %d \n ", Pvalue, Row, Col, j, l);
 		P[Row * l + Col] = Pvalue;
-		// printf("P new val %f %d \n", P[Row * l + Col], Row * l + Col);
 	 }
 }
 
@@ -80,7 +72,7 @@ int main(int argc, char**argv){
 		return 0;		
 	}
 
-	srand(4);
+	srand(time(NULL));
 
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
@@ -105,14 +97,11 @@ int main(int argc, char**argv){
 	generateMat(m, j, k);
 	generateMat(n, k, l);	
 	
-	printMat(m, j, k);
-	printMat(n, k, l);
-	
 	cudaMemcpy(d_m, m, mSize, cudaMemcpyHostToDevice);
-	cudaMemcpy(d_n, n, mSize, cudaMemcpyHostToDevice);
+	cudaMemcpy(d_n, n, nSize, cudaMemcpyHostToDevice);
 
-	dim3 threadDims(BLOCK_WIDTH, BLOCK_WIDTH, 1);
-	dim3 blockDims(ceil(j * 1.0/ BLOCK_WIDTH), ceil(l * 1.0/BLOCK_WIDTH), 1);
+	dim3 threadDims(TILE_WIDTH, TILE_WIDTH, 1);
+	dim3 blockDims(ceil(j * 1.0/ TILE_WIDTH), ceil(l * 1.0/TILE_WIDTH), 1);
 	TiledMatrixMulKernel<<<blockDims, threadDims>>>(d_m, d_n, d_p, j, k, l);
 
 	cudaThreadSynchronize();
@@ -121,8 +110,6 @@ int main(int argc, char**argv){
 		printf("Error %d\n", cudaGetLastError()); 
 		exit(-1);
 	}  
-	
-	printMat(p, j, l);
 
 	cudaEventRecord(stop, 0);
 	cudaEventSynchronize(stop);

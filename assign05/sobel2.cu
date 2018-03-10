@@ -4,55 +4,57 @@
 #include "qdbmp.h"
 
 #define CHANNELS	3
-#define BLUR_RADIUS	5
+#define N_THREADS	32.0
+#define THRESHOLD	75
+#define MAX(x,y) (((x) > (y) ? (x) : (y)))
+#define MIN(x,y) (((x) < (y) ? (x) : (y)))
 
-__global__ void blurKernel(unsigned char* input, unsigned char* output, 
-			 int height, int width, int batchSize) {
-	assert(batchSize % 2 != 0);
-	
+
+__global__ void convertToGray(unsigned char* rgb, unsigned char *gray, size_t height, size_t width){
+
 	int Col = blockIdx.x * blockDim.x + threadIdx.x;
 	int Row = blockIdx.y * blockDim.y + threadIdx.y;
 
 	if (Col < width && Row < height) {
-		int redPixVal = 0;
-		int redPixels = 0;
+		gray[Row * width + Col] = MIN(255, (unsigned char) 
+											0.21 * rgb[(Row * width + Col) * CHANNELS] + 
+											0.72 * rgb[(Row * width + Col) * CHANNELS + 1] + 
+											0.07 * rgb[(Row * width + Col) * CHANNELS + 2]);
+	}
+}
+
+__global__ void findEdges(unsigned char* gray, unsigned char* edges, int height, int width) {
+	const int sobelX[3][3] = {{1,0,-1}, {2,0,-2}, {1,0,-1}};
+	const int sobelY[3][3] = {{1,2,1}, {0, 0,0}, {-1,-2,-1}};
+	
+	int Col = blockIdx.x * blockDim.x + threadIdx.x;
+	int Row = blockIdx.y * blockDim.y + threadIdx.y;
+	
+	if (Col < width && Row < height) {
 		
-		int greenPixVal = 0;
-		int greenPixels = 0;
-		
-		int bluePixVal = 0;
-		int bluePixels = 0;
+		int kernelW = 1;
+		int convRow, convCol, sobelXSum, sobelYSum;
+		sobelXSum = 0;
+		sobelYSum = 0;
+		for (convRow = 0 - kernelW; convRow < kernelW + 1; ++convRow){
+			for (convCol = 0 - kernelW; convCol < kernelW + 1; ++convCol) {
 
-		int  blurRow, blurCol;
-
-		int batchW = batchSize / 2;
-		for (blurRow = 0 - batchW; blurRow < batchW + 1; ++blurRow){
-			for (blurCol = 0 - batchW; blurCol < batchW + 1; ++blurCol) {
-				
-				int curRow = Row + blurRow;
-				int curCol = Col + blurCol;
-				int offset = (curRow * width + curCol) * CHANNELS;
-
-				if (curRow > -1 && curRow < height && 
-					curCol > -1 && curCol < width){
+				if (convRow + Row > -1 && convRow + Row < height && 
+					convCol + Col > -1 && convCol + Col < width){
 					
-					redPixVal += input[offset];
-					redPixels++;
+					sobelXSum += sobelX[convRow + 1][convCol + 1] * 
+								 gray[(convRow + Row) * width + (convCol + Col)]; 
+								
+					sobelYSum += sobelY[convRow + 1][convCol + 1] * 
+								 gray[(convRow + Row) * width + (convCol + Col)];
 
-					greenPixVal += input[offset + 1];
-					greenPixels++;
-
-					bluePixVal += input[offset + 2];
-					bluePixels++;
 				}
 
 			}
 		}
+		edges[Row * width + Col] = 
+			sqrtf(powf(sobelXSum, 2) + powf(sobelYSum, 2)) > THRESHOLD ? 255 : 0;
 
-		int offset = (Row * width + Col) * CHANNELS;
-		output[offset] = (unsigned char)(redPixVal / redPixels);
-		output[offset + 1] = (unsigned char)(greenPixVal / greenPixels);
-		output[offset + 2] = (unsigned char)(bluePixVal / bluePixels);
 	}
 }
 
@@ -62,6 +64,9 @@ int main(int argc, char**argv){
 	if (argc >= 2) {
 		strcpy(srcName, argv[1]);
 		strcpy(destName, argv[2]);
+	} else {
+		printf("Run the program %s (input) (output)\n", argv[0]);
+		exit(0);
 	}
 	
 	BMP *bmp = BMP_ReadFile(srcName);
@@ -73,40 +78,46 @@ int main(int argc, char**argv){
 
 	assert(imageDepth == 24);
 
-	unsigned char *origImage, *blurredImage;
-	unsigned char *d_origImage, *d_blurredImage;
+	unsigned char *origImage, *edges;
+	unsigned char *d_origImage, *d_gray, *d_edges;
 
 	origImage = (unsigned char*)malloc(imageHeight * imageWidth * CHANNELS);
-	blurredImage = (unsigned char *)malloc(imageHeight * imageWidth * CHANNELS);
-	
+	edges = (unsigned char *)malloc(imageHeight * imageWidth);
+
 	cudaMalloc((void **)&d_origImage, imageHeight * imageWidth * CHANNELS);
-	cudaMalloc((void **)&d_blurredImage, imageHeight * imageWidth * CHANNELS);
-	
+	cudaMalloc((void **)&d_gray, imageHeight * imageWidth);
+	cudaMalloc((void **)&d_edges, imageHeight * imageWidth);
+
 	int i, j;
 	for (i = 0; i < imageWidth; i++) {
 		for (j = 0; j < imageHeight; j++) {
 			int offset = (j * imageWidth + i) * CHANNELS;
-			BMP_GetPixelRGB(bmp, i, j, &origImage[offset], &origImage[offset+1], &origImage[offset+2]);	
-		}
+			BMP_GetPixelRGB(bmp, i, j, &origImage[offset],&origImage[offset+1], &origImage[offset+2]);		  }
 	}
 
 	cudaMemcpy(d_origImage, origImage, imageHeight * imageWidth * CHANNELS, cudaMemcpyHostToDevice);
 
-	float threadNum = 32;
-	dim3 DimGrid(ceil(imageWidth / threadNum), ceil(imageHeight / threadNum), 1);
-	dim3 DimBlock(threadNum, threadNum, 1);
-	blurKernel<<<DimGrid, DimBlock>>>(d_origImage, d_blurredImage, imageHeight, imageWidth, BLUR_RADIUS);
+	dim3 DimGrid(ceil(imageWidth / N_THREADS), ceil(imageHeight / N_THREADS), 1);
+	dim3 DimBlock(N_THREADS, N_THREADS, 1);
 
-	cudaMemcpy(blurredImage, d_blurredImage, imageHeight * imageWidth * CHANNELS, cudaMemcpyDeviceToHost);
+	convertToGray<<<DimGrid, DimBlock>>>(d_origImage, d_gray, imageHeight, imageWidth);
+	findEdges<<<DimGrid, DimBlock>>>(d_gray, d_edges, imageHeight, imageWidth);
 
-	BMP *destBmp = BMP_Create(imageWidth, imageHeight, 8 * CHANNELS);
+	cudaMemcpy(edges, d_edges, imageHeight * imageWidth, cudaMemcpyDeviceToHost);
+
+	BMP *destBmp = BMP_Create(imageWidth, imageHeight, 8);
 	
+	for (i = 0; i < 256; i++) {
+		BMP_SetPaletteColor(destBmp, i, i ,i, i);
+	}
+
 	for (i = 0; i < imageWidth; i++){
 		for (j = 0; j < imageHeight; j++) {
-			int offset = (j * imageWidth + i) * CHANNELS;
-			BMP_SetPixelRGB(destBmp, i, j, blurredImage[offset], blurredImage[offset+1], blurredImage[offset+2]);
+			int offset = (j * imageWidth + i);
+			BMP_SetPixelIndex(destBmp, i, j, edges[offset]);
 		}
 	}
+
 
 	BMP_WriteFile(destBmp, destName);
 

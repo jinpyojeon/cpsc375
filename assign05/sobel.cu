@@ -5,6 +5,7 @@
 
 #define CHANNELS	3
 #define N_THREADS	32.0
+#define THRESHOLD	75
 #define MAX(x,y) (((x) > (y) ? (x) : (y)))
 #define MIN(x,y) (((x) < (y) ? (x) : (y)))
 
@@ -15,9 +16,10 @@ __global__ void convertToGray(unsigned char* rgb, unsigned char *gray, size_t he
 	int Row = blockIdx.y * blockDim.y + threadIdx.y;
 
 	if (Col < width && Row < height) {
-		gray[Row * width + Col] = 0.21 * rgb[Row * width + Col] + 
-								  0.72 * rgb[Row * width + Col + 1] + 
-								  0.07 * rgb[Row * width + Col + 2];
+		gray[Row * width + Col] = MIN(255, (unsigned char) 
+											0.21 * rgb[(Row * width + Col) * CHANNELS] + 
+											0.72 * rgb[(Row * width + Col) * CHANNELS + 1] + 
+											0.07 * rgb[(Row * width + Col) * CHANNELS + 2]);
 	}
 }
 
@@ -30,7 +32,7 @@ __global__ void findEdges(unsigned char* gray, unsigned char* edges, int height,
 	
 	if (Col < width && Row < height) {
 		
-		int kernelW = sizeof(sobelX[0]) / 2;
+		int kernelW = 1;
 		int convRow, convCol, sobelXSum, sobelYSum;
 		sobelXSum = 0;
 		sobelYSum = 0;
@@ -50,7 +52,8 @@ __global__ void findEdges(unsigned char* gray, unsigned char* edges, int height,
 
 			}
 		}
-		edges[Row * width + Col] = MAX(255, sqrtf(powf(sobelXSum, 2) + powf(sobelYSum, 2)));
+		edges[Row * width + Col] = 
+			sqrtf(powf(sobelXSum, 2) + powf(sobelYSum, 2)) > THRESHOLD ? 255 : 0;
 
 	}
 }
@@ -104,9 +107,9 @@ int main(int argc, char**argv){
 
 	BMP *destBmp = BMP_Create(imageWidth, imageHeight, 8);
 	
-	// for (i = 0; i < 256; i++) {
-	//	BMP_SetPaletteColor(destBmp, i, i,i,i);
-	//}
+	for (i = 0; i < 256; i++) {
+		BMP_SetPaletteColor(destBmp, i, i ,i, i);
+	}
 
 	for (i = 0; i < imageWidth; i++){
 		for (j = 0; j < imageHeight; j++) {
@@ -114,6 +117,7 @@ int main(int argc, char**argv){
 			BMP_SetPixelIndex(destBmp, i, j, edges[offset]);
 		}
 	}
+
 
 	BMP_WriteFile(destBmp, destName);
 
